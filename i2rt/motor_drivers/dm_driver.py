@@ -439,23 +439,36 @@ class DMChainCanInterface(MotorChain):
         self.state_lock = threading.Lock()
         self._report_interval = report_interval
         self._rate_recorder = RateRecorder(name=self, report_interval=report_interval)
+        self.running = False
+        self.start_thread_flag = False
+        self._control_thread: Optional[threading.Thread] = None
 
         self.same_bus_device_states = None
         self.same_bus_device_lock = threading.Lock()
 
-        with self.same_bus_device_lock:
-            if get_same_bus_device_driver is not None:
-                self.same_bus_device_driver = get_same_bus_device_driver(self.motor_interface)
-            else:
-                self.same_bus_device_driver = None
+        try:
+            with self.same_bus_device_lock:
+                if get_same_bus_device_driver is not None:
+                    self.same_bus_device_driver = get_same_bus_device_driver(self.motor_interface)
+                else:
+                    self.same_bus_device_driver = None
 
-            if self.same_bus_device_driver is not None:
-                drained = self.motor_interface._drain_bus(timeout_s=0.2)
-                if drained:
-                    logging.info(f"Drained {drained} stale frames before motor bring-up")
+                if self.same_bus_device_driver is not None:
+                    drained = self.motor_interface._drain_bus(timeout_s=0.2)
+                    if drained:
+                        logging.info(f"Drained {drained} stale frames before motor bring-up")
 
-            self.absolute_positions = None
-            self._motor_on()
+                self.absolute_positions = None
+                self._motor_on()
+        except Exception:
+            # A failed constructor otherwise leaks the SocketCAN descriptor and
+            # leaves any motors enabled before the failing motor in MIT mode.
+            self.running = False
+            try:
+                self.motor_interface.close()
+            except Exception:
+                logging.exception("Failed to close CAN interface after motor bring-up failure")
+            raise
         starting_command = []
         for motor_state in self.state:
             starting_command.append(MotorCmd(torque=motor_state.torque))
@@ -463,7 +476,6 @@ class DMChainCanInterface(MotorChain):
         self.commands = starting_command
         self.command_lock = threading.RLock()
 
-        self.start_thread_flag = False
         if start_thread:
             self.start_thread()
 
@@ -519,11 +531,21 @@ class DMChainCanInterface(MotorChain):
 
     def _motor_on(self) -> None:
         motor_feedback = []
+        enabled_motor_ids = []
         self.motor_interface._drain_bus(timeout_s=0.05)
-        for motor_id, motor_type in self.motor_list:
-            logging.info(f"Turning on motor_id: {motor_id}, motor_type: {motor_type}")
-            time.sleep(0.003)
-            motor_feedback.append(self.motor_interface.motor_on(motor_id, motor_type))
+        try:
+            for motor_id, motor_type in self.motor_list:
+                logging.info(f"Turning on motor_id: {motor_id}, motor_type: {motor_type}")
+                time.sleep(0.003)
+                motor_feedback.append(self.motor_interface.motor_on(motor_id, motor_type))
+                enabled_motor_ids.append(motor_id)
+        except Exception:
+            for motor_id in reversed(enabled_motor_ids):
+                try:
+                    self.motor_interface.motor_off(motor_id)
+                except Exception:
+                    logging.exception("Failed to turn off motor %s after bring-up failure", motor_id)
+            raise
         self._update_absolute_positions(motor_feedback)
         self.state = motor_feedback
         self.running = True
@@ -532,9 +554,9 @@ class DMChainCanInterface(MotorChain):
         if self.start_thread_flag:
             return
         logging.info("starting separate thread for control loop")
-        thread = threading.Thread(target=self._set_torques_and_update_state)
-        thread.start()
+        self._control_thread = threading.Thread(target=self._set_torques_and_update_state)
         self.start_thread_flag = True
+        self._control_thread.start()
         time.sleep(0.1)
         while self.state is None:
             time.sleep(0.1)
@@ -748,6 +770,16 @@ class DMChainCanInterface(MotorChain):
 
     def close(self) -> None:
         self.running = False
+        control_thread = self._control_thread
+        if (
+            control_thread is not None
+            and control_thread is not threading.current_thread()
+            and control_thread.is_alive()
+        ):
+            control_thread.join(timeout=3.0)
+            if control_thread.is_alive():
+                logging.warning("CAN control thread did not stop before interface close")
+                return
         self.motor_interface.close()
 
 
