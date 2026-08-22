@@ -37,3 +37,29 @@ def test_request_waits_for_matching_response_after_unrelated_frame() -> None:
 
     assert response is expected
     assert len(interface.bus.sent) == 1
+
+
+def test_request_suppresses_timeout_warning_until_retries_are_exhausted() -> None:
+    expected = can.Message(arbitration_id=0x11, data=bytes(8))
+    interface = object.__new__(CanInterface)
+    interface.bus = _FakeBus([])
+    interface.name = "yam_real"
+    interface.channel = "can2"
+    interface.receive_mode = type("_Mode", (), {"get_receive_id": lambda self, _id: 0x11})()
+    calls: list[bool] = []
+
+    def receive(*_args: object, supress_warning: bool = False, **_kwargs: object) -> can.Message | None:
+        calls.append(supress_warning)
+        return expected if len(calls) == 2 else None
+
+    interface._receive_message = receive
+
+    response = interface._send_message_get_response(
+        id=1,
+        motor_id=1,
+        data=[0] * 8,
+        max_retry=2,
+    )
+
+    assert response is expected
+    assert calls == [True, True]

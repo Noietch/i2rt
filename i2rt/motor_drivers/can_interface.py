@@ -54,7 +54,12 @@ class CanInterface:
             try:
                 # logging.info("Sending message: %s at %f", message, time.time())
                 self.bus.send(message)
-                response = self._receive_message(motor_id, timeout=0.01, expected_id=expected_id)
+                response = self._receive_message(
+                    motor_id,
+                    timeout=0.01,
+                    supress_warning=True,
+                    expected_id=expected_id,
+                )
                 # logging.info("Received response: %s at %f", response, time.time())
                 if response:
                     return response
