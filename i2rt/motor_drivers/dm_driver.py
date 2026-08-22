@@ -60,7 +60,9 @@ class PassiveEncoderInfo:
     id: int
     """The device number, uint8."""
     position: float
-    """Position, in radian (encoder) or axis [-1, 1] center 0 (joystick analog)."""
+    """Normalized encoder position in [0, 1]."""
+    raw_position: float
+    """Signed encoder position in radians before clipping and normalization."""
     velocity: float
     """Velocity, in radian/s."""
     io_inputs: List[bool]
@@ -94,19 +96,33 @@ class PassiveEncoderReader:
         message = self.can_interface._send_message_get_response(
             encoder_id, encoder_id, data, expected_id=self.receive_mode.get_receive_id(0x50E), max_retry=15
         )
-        pos, vel, button_state = self._parse_encoder_message(message)
+        raw_pos, vel, button_state = self._parse_encoder_message(message)
         pos_range = [-self.range_rad, self.range_rad]
-        pos = np.clip(pos, pos_range[0], pos_range[1])
+        pos = np.clip(raw_pos, pos_range[0], pos_range[1])
         # normalize pos to 1 - 0
         delta = np.abs(0.0 - pos)
         pos = delta / self.range_rad
-        result = PassiveEncoderInfo(id=encoder_id, position=pos, velocity=vel, io_inputs=button_state)
+        result = PassiveEncoderInfo(
+            id=encoder_id,
+            position=pos,
+            raw_position=raw_pos,
+            velocity=vel,
+            io_inputs=button_state,
+        )
         return result
 
-    def _parse_encoder_message(self, message: can.Message) -> PassiveEncoderInfo:
+    def _parse_encoder_message(self, message: can.Message) -> tuple[float, float, List[bool]]:
         # Standard format
-        struct_format = "!B h h B"
-        _device_id, position, velocity, digital_inputs = struct.unpack(struct_format, message.data)
+        # The ioheart encoder puts its absolute position in a 12-bit field
+        # carried by an unsigned 16-bit word.  Some firmware versions sign
+        # extend negative positions (0xFFFC), while others leave the upper
+        # nibble clear (0x0FFC).  Unpacking the latter as int16 turns -4 into
+        # +4092 and makes a handle that crosses zero appear permanently open.
+        struct_format = "!B H h B"
+        _device_id, encoded_position, velocity, digital_inputs = struct.unpack(struct_format, message.data)
+        position = encoded_position & 0x0FFF
+        if position & 0x0800:
+            position -= 0x1000
 
         # Convert position and velocity to radians
         position_rad = position * 2 * np.pi / 4096
