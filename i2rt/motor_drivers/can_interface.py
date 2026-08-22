@@ -48,18 +48,16 @@ class CanInterface:
             can.Message: The message that was sent.
         """
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
+        if expected_id is None:
+            expected_id = self.receive_mode.get_receive_id(motor_id)
         for _ in range(max_retry):
             try:
                 # logging.info("Sending message: %s at %f", message, time.time())
                 self.bus.send(message)
-                response = self._receive_message(motor_id, timeout=0.01)
+                response = self._receive_message(motor_id, timeout=0.01, expected_id=expected_id)
                 # logging.info("Received response: %s at %f", response, time.time())
-
-                if expected_id is None:
-                    expected_id = self.receive_mode.get_receive_id(motor_id)
-                if response and (expected_id == response.arbitration_id):
+                if response:
                     return response
-                self.try_receive_message(id)
             except (can.CanError, AssertionError) as e:
                 logging.warning(e)
                 logging.warning(
@@ -107,7 +105,11 @@ class CanInterface:
         return drained
 
     def _receive_message(
-        self, motor_id: Optional[int] = None, timeout: float = 0.009, supress_warning: bool = False
+        self,
+        motor_id: Optional[int] = None,
+        timeout: float = 0.009,
+        supress_warning: bool = False,
+        expected_id: Optional[int] = None,
     ) -> Optional[can.Message]:
         """Receive a message from the CAN bus.
 
@@ -126,11 +128,12 @@ class CanInterface:
                 message = self.buffered_reader.get_message(timeout=0.001)
             else:
                 message = self.bus.recv(timeout=0.001)
-            if message:
+            if message and (expected_id is None or message.arbitration_id == expected_id):
                 return message
         if not supress_warning:
             logging.warning(
                 "\033[91m"
-                + f"Failed to receive message, {self.name} motor id {motor_id} motor timeout. Check if the motor is powered on or if the motor ID exists."
+                + f"Failed to receive message, {self.name} motor id {motor_id} motor timeout "
+                + f"on {self.channel}. Check if the motor is powered on or if the motor ID exists."
                 + "\033[0m"
             )
