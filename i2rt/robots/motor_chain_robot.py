@@ -17,6 +17,8 @@ from i2rt.robots.robot import Robot
 from i2rt.robots.utils import ArmType, GripperForceLimiter, GripperType, JointMapper, detect_gripper_limits
 from i2rt.utils.mujoco_utils import MuJoCoKDL
 
+MIN_GRAVITY_COMP_CONTROL_FREQUENCY_HZ = 75.0
+
 
 @dataclass
 class JointStates:
@@ -339,7 +341,7 @@ class MotorChainRobot(Robot):
                 control_frequency = iteration_count / elapsed_time
                 # Overwrite the current line with the new frequency information
                 logging.info(f"{self}: Grav Comp Control Frequency: {control_frequency:.2f} Hz")
-                if control_frequency < 100:
+                if control_frequency < MIN_GRAVITY_COMP_CONTROL_FREQUENCY_HZ:
                     logging.warning(
                         f"{self}: Gravity compensation control loop is slow, current frequency: {control_frequency:.2f} Hz"
                     )
