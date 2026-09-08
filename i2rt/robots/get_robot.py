@@ -146,6 +146,9 @@ def get_yam_robot(
     set_realtime_and_pin_callback: Optional[Callable[[int], None]] = None,
     enable_auto_recovery: bool = False,
     use_coulomb_friction: bool = False,
+    limit_gripper_force: float = 50.0,
+    gripper_force_effort_compensation: float = 0.3,
+    gripper_torque_limits: Optional[tuple[float, float]] = None,
 ) -> "Robot":
     """Create a YAM-family robot (real or sim).
 
@@ -161,6 +164,10 @@ def get_yam_robot(
         gripper_limits_override: Optional [closed, open] limits. If provided, skips calibration.
         gripper_kp: Optional gripper kp override. Defaults to gripper_type's default.
         gripper_kd: Optional gripper kd override. Defaults to gripper_type's default.
+        limit_gripper_force: Blocked-gripper force limit in newtons.
+        gripper_force_effort_compensation: Additional blocked-gripper effort in Nm.
+        gripper_torque_limits: Optional (open, close) torque magnitudes in Nm. Enables
+            bounded software gripper impedance instead of blocked-gripper force limiting.
         sim: If True, return a SimRobot instead of connecting to real hardware.
         enable_auto_recovery: If True, the motor chain tries to clean+re-enable errored motors in its
             control loop instead of failing fast. Defaults to False (fail-fast).
@@ -302,6 +309,8 @@ def get_yam_robot(
             enable_gripper_calibration=gripper_needs_cal,
             gripper_type=gripper_type,
             arm_type=arm_type,
-            limit_gripper_force=50.0,
+            limit_gripper_force=limit_gripper_force,
+            gripper_force_effort_compensation=gripper_force_effort_compensation,
+            gripper_torque_limits=gripper_torque_limits,
         )
     return get_robot()

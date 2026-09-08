@@ -82,6 +82,7 @@ class MotorChainRobot(Robot):
         joint_limits: Optional[np.ndarray] = None,  # if provided, override the mujoco xml joint limits
         gripper_limits: Optional[np.ndarray] = None,  # [closed, open]
         limit_gripper_force: float = -1,  # whether to limit the gripper effort when it is blocked. -1 means no limit.
+        gripper_force_effort_compensation: float = 0.3,
         clip_motor_torque: float = np.inf,  # clip the offset motor torque, real motor torque can still still be larger than this setting depending on the motor onboard PID loop
         gripper_type: GripperType = GripperType.LINEAR_4310,
         arm_type: ArmType = ArmType.YAM,
@@ -97,7 +98,13 @@ class MotorChainRobot(Robot):
         joint_state_saver_factory: Optional[Callable[[], Any]] = None,
         set_realtime_and_pin_callback: Optional[Callable[[int], None]] = None,
         enable_auto_recovery: Optional[bool] = None,  # None: inherit motor_chain's setting; True/False: override it
+        gripper_torque_limits: Optional[Tuple[float, float]] = None,
     ) -> None:
+        if gripper_torque_limits is not None:
+            limits = np.asarray(gripper_torque_limits, dtype=float)
+            if limits.shape != (2,) or not np.all(np.isfinite(limits)) or np.any(limits <= 0):
+                raise ValueError("Gripper torque limits must be positive finite (open, close) magnitudes in Nm")
+        self._gripper_torque_limits = gripper_torque_limits
         # Set up CPU pinning and real-time scheduling if requested
         if pinned_cpu is not None and set_realtime_and_pin_callback is not None:
             set_realtime_and_pin_callback(pinned_cpu)
@@ -160,7 +167,11 @@ class MotorChainRobot(Robot):
 
         if self._gripper_index is not None:
             self._gripper_force_limiter = GripperForceLimiter(
-                max_force=limit_gripper_force, gripper_type=gripper_type, arm_type=arm_type, kp=kp[gripper_index]
+                max_force=limit_gripper_force,
+                gripper_type=gripper_type,
+                arm_type=arm_type,
+                kp=kp[gripper_index],
+                effort_compensation=gripper_force_effort_compensation,
             )  # force in newton
             self._limit_gripper_force = limit_gripper_force
 
@@ -317,6 +328,7 @@ class MotorChainRobot(Robot):
         }
         if self._gripper_index is not None:
             info["limit_gripper_effort"] = self._limit_gripper_force
+            info["gripper_torque_limits"] = self._gripper_torque_limits
         return info
 
     def start_server(self) -> None:
@@ -363,10 +375,13 @@ class MotorChainRobot(Robot):
             )
             motor_torques = joint_commands.torques + g * self.gravity_comp_factor + friction_comp
             motor_torques = np.clip(motor_torques, -self._clip_motor_torque, self._clip_motor_torque)
-            self._last_motor_torques = motor_torques.copy()
 
             if self._gripper_index is not None:
-                if self._limit_gripper_force > 0 and self._joint_state is not None:
+                if (
+                    self._gripper_torque_limits is None
+                    and self._limit_gripper_force > 0
+                    and self._joint_state is not None
+                ):
                     # Get current gripper state in raw robot joint pos space
                     gripper_state = {
                         "target_qpos": joint_commands.pos[self._gripper_index],
@@ -391,7 +406,32 @@ class MotorChainRobot(Robot):
                     max(self._gripper_limits),
                 )
                 self._last_gripper_command_qpos = joint_commands.pos[self._gripper_index]
+                if self._gripper_torque_limits is not None:
+                    self._apply_gripper_impedance(motor_torques, joint_commands)
+            self._last_motor_torques = motor_torques.copy()
             self._update_joint_state(motor_torques, joint_commands)
+
+    def _apply_gripper_impedance(self, motor_torques: np.ndarray, commands: "JointCommands") -> None:
+        """Replace the gripper's onboard PD with a bounded software spring and damper."""
+        index = self._gripper_index
+        raw_pos = self.remapper.to_robot_joint_pos_space(self._joint_state.pos)[index]
+        raw_vel = self.remapper.to_robot_joint_vel_space(self._joint_state.vel)[index]
+        kp, kd = commands.kp[index], commands.kd[index]
+        # Commands is a private copy; keep stored gains for subsequent control ticks.
+        commands.kp[index] = 0.0
+        commands.kd[index] = 0.0
+        commands.vel[index] = 0.0
+        values = [raw_pos, raw_vel, commands.pos[index], kp, kd, motor_torques[index]]
+        if not np.all(np.isfinite(values)):
+            motor_torques[index] = 0.0
+            commands.pos[index] = raw_pos if np.isfinite(raw_pos) else 0.0
+            return
+        torque = motor_torques[index] + kp * (commands.pos[index] - raw_pos) - kd * raw_vel
+        # Calibrated limits are [closed, open], in the SDK's motor coordinates.
+        closing_direction = np.sign(self._gripper_limits[0] - self._gripper_limits[1])
+        open_limit, close_limit = self._gripper_torque_limits
+        torque = closing_direction * np.clip(closing_direction * torque, -open_limit, close_limit)
+        motor_torques[index] = np.clip(torque, -self._clip_motor_torque, self._clip_motor_torque)
 
     def _update_joint_state(
         self,
@@ -511,7 +551,7 @@ class MotorChainRobot(Robot):
         return len(self.motor_chain)
 
     def get_motor_torques(self) -> Optional[np.ndarray]:
-        """Return the last computed motor torques (gravity comp + any command torques)."""
+        """Return commanded feedforward torques, including software gripper impedance if enabled."""
         return self._last_motor_torques
 
     def get_joint_pos(self) -> np.ndarray:

@@ -603,6 +603,7 @@ class GripperForceLimiter:
         gripper_type: GripperType,
         arm_type: "ArmType",
         kp: float,
+        effort_compensation: float = 0.3,
         average_torque_window: float = 0.1,  # in seconds
         debug: bool = False,
     ):
@@ -611,6 +612,7 @@ class GripperForceLimiter:
         self._is_clogged = False
         self._gripper_adjusted_qpos = None
         self._kp = kp
+        self.effort_compensation = effort_compensation
         self._past_gripper_effort_buffer = LockFreeCircularBuffer(maxsize=1000)
         self.average_torque_window = average_torque_window
         self.debug = debug
@@ -645,7 +647,7 @@ class GripperForceLimiter:
         if self._is_clogged:
             target_eff = self.gripper_force_torque_map(current_angle=gripper_state["current_qpos"])
             self._is_clogged = True
-            return target_eff + 0.3  # this is to compensate the friction
+            return target_eff + self.effort_compensation
         else:
             return None
 
